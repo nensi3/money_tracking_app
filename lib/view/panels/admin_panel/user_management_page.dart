@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:money_tracking_app/model/user_model.dart';
 import 'package:money_tracking_app/controller/services/firestore_service.dart';
 import 'package:money_tracking_app/view/widgets/app_gradient_background.dart';
