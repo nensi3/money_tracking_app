@@ -1,4 +1,4 @@
-﻿import 'package:flutter/material.dart';
+import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:money_tracking_app/view/widgets/glass_card.dart';
 import 'package:money_tracking_app/view/widgets/app_gradient_background.dart';
@@ -16,6 +16,10 @@ import 'view_analytics_page.dart';
 import 'system_settings_page.dart';
 import 'mfa_settings_page.dart';
 import 'package:money_tracking_app/view/screens/login_screen.dart';
+import 'dart:convert';
+import 'package:flutter/services.dart' show rootBundle;
+import 'package:money_tracking_app/controller/services/transaction_service.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 
 class AdminPanelScreen extends StatefulWidget {
   const AdminPanelScreen({super.key});
@@ -67,9 +71,147 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
       );
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Logout failed: $e')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Logout failed: $e')),
+      );
+    }
+  }
+
+  Future<void> _showSeedDialog() async {
+    final TextEditingController _uidController = TextEditingController();
+    bool onlyIfEmpty = true;
+
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Seed Sample Data'),
+          content: StatefulBuilder(
+            builder: (context, setState) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Enter user UID to seed sample transactions.'),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _uidController,
+                    decoration: const InputDecoration(
+                      labelText: 'User UID',
+                      hintText: 'Paste user id or leave blank to pick current user',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Checkbox(
+                        value: onlyIfEmpty,
+                        onChanged: (v) => setState(() => onlyIfEmpty = v ?? true),
+                      ),
+                      const SizedBox(width: 6),
+                      const Expanded(child: Text('Only seed if user has no transactions')),
+                    ],
+                  ),
+                ],
+              );
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final uidText = _uidController.text.trim();
+                String targetUid = uidText;
+                if (targetUid.isEmpty) {
+                  final current = _auth.currentUser;
+                  if (current == null) {
+                    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('No current user. Paste a UID.')));
+                    return;
+                  }
+                  targetUid = current.uid;
+                }
+
+                Navigator.of(context).pop();
+                await _seedSampleDataForUser(targetUid, onlyIfEmpty: onlyIfEmpty);
+              },
+              child: const Text('Seed'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Future<void> _seedSampleDataForUser(String uid, {bool onlyIfEmpty = true}) async {
+    final txService = TransactionService();
+
+    try {
+      if (onlyIfEmpty) {
+        final existing = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .collection('transactions')
+            .limit(1)
+            .get();
+        if (existing.docs.isNotEmpty) {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('User already has transactions; skipping seeding.')));
+          return;
+        }
+      }
+
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Seeding sample data...')));
+
+      final jsonStr = await rootBundle.loadString('assets/previous_month_data.json');
+      final List<dynamic> items = jsonDecode(jsonStr) as List<dynamic>;
+      int success = 0;
+      for (final item in items) {
+        try {
+          final amount = (item['amount'] as num).toDouble();
+          final type = (item['type'] ?? 'expense').toString();
+          final category = (item['category'] ?? 'Other').toString();
+          final note = (item['note'] ?? '').toString();
+          final date = DateTime.parse(item['date'].toString());
+
+          await txService.createTransaction(
+            userId: uid,
+            amount: amount,
+            category: category,
+            description: note,
+            date: date,
+            type: type,
+            status: 'Approved',
+          );
+          success++;
+        } catch (e) {
+          print('Seed entry failed: $e');
+        }
+      }
+
+      // Ensure the parent user's transactionCount matches the actual number
+      try {
+        final txSnapshot = await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .collection('transactions')
+            .get();
+        final actualCount = txSnapshot.docs.length;
+        await FirebaseFirestore.instance
+            .collection('users')
+            .doc(uid)
+            .update({'transactionCount': actualCount});
+      } catch (e) {
+        // Non-fatal: log and continue so seeding result still reports
+        print('Failed to update transactionCount: $e');
+      }
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Seeding complete: $success entries added.')));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Seeding failed: $e')));
     }
   }
 
@@ -344,7 +486,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                       title: 'Total Users',
                                       value: '$totalUsers',
                                       subtitle: 'Registered accounts',
-                                      trendLabel: 'â†‘',
+                                      trendLabel: '↑',
                                       icon: Icons.people_rounded,
                                       color: Colors.blue,
                                     );
@@ -353,7 +495,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                       title: 'Transactions',
                                       value: '$totalTransactions',
                                       subtitle: 'All ledger entries',
-                                      trendLabel: 'â†‘',
+                                      trendLabel: '↑',
                                       icon: Icons.swap_horiz_rounded,
                                       color: Colors.green,
                                     );
@@ -365,8 +507,8 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                         currencyCode: defaultCurrency,
                                       ),
                                       subtitle:
-                                          'Income total â€¢ $defaultCurrency',
-                                      trendLabel: 'â†‘',
+                                          'Income total • $defaultCurrency',
+                                      trendLabel: '↑',
                                       icon: Icons.trending_up_rounded,
                                       color: Colors.orange,
                                     );
@@ -375,7 +517,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                       title: 'System Health',
                                       value: systemHealthText,
                                       subtitle: 'Operational status',
-                                      trendLabel: maintenanceMode ? '!' : 'â—',
+                                      trendLabel: maintenanceMode ? '!' : '•',
                                       icon: Icons.favorite_rounded,
                                       color: systemHealthColor,
                                     );
@@ -401,9 +543,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                     onTap: () => Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) =>
-                                            const UserManagementPage(),
-                                      ),
+                                          builder: (_) => const UserManagementPage()),
                                     ),
                                   ),
                                   const SizedBox(height: 10),
@@ -415,9 +555,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                     onTap: () => Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) =>
-                                            const AdminApproveTransactionsPage(),
-                                      ),
+                                          builder: (_) => const AdminApproveTransactionsPage()),
                                     ),
                                   ),
                                   const SizedBox(height: 10),
@@ -427,32 +565,7 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                     onTap: () => Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) =>
-                                            const ViewAnalyticsPage(),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  _AdminAction(
-                                    icon: Icons.security_rounded,
-                                    title: 'System Settings',
-                                    onTap: () => Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) =>
-                                            const SystemSettingsPage(),
-                                      ),
-                                    ),
-                                  ),
-                                  const SizedBox(height: 10),
-                                  _AdminAction(
-                                    icon: Icons.shield_rounded,
-                                    title: 'MFA Settings',
-                                    onTap: () => Navigator.push(
-                                      context,
-                                      MaterialPageRoute(
-                                        builder: (_) => const MFASettingsPage(),
-                                      ),
+                                          builder: (_) => const ViewAnalyticsPage()),
                                     ),
                                   ),
                                   const SizedBox(height: 10),
@@ -462,10 +575,34 @@ class _AdminPanelScreenState extends State<AdminPanelScreen> {
                                     onTap: () => Navigator.push(
                                       context,
                                       MaterialPageRoute(
-                                        builder: (_) =>
-                                            const AdminCategoryManagementPage(),
-                                      ),
+                                          builder: (_) => const AdminCategoryManagementPage()),
                                     ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  _AdminAction(
+                                    icon: Icons.settings_rounded,
+                                    title: 'System Settings',
+                                    onTap: () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => const SystemSettingsPage()),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  _AdminAction(
+                                    icon: Icons.security_rounded,
+                                    title: 'MFA Settings',
+                                    onTap: () => Navigator.push(
+                                      context,
+                                      MaterialPageRoute(
+                                          builder: (_) => const MFASettingsPage()),
+                                    ),
+                                  ),
+                                  const SizedBox(height: 10),
+                                  _AdminAction(
+                                    icon: Icons.upload_file_rounded,
+                                    title: 'Seed Sample Data',
+                                    onTap: () => _showSeedDialog(),
                                   ),
                                 ],
                               ),
@@ -651,8 +788,8 @@ class _AdminActionState extends State<_AdminAction> {
               color: widget.highlightPending
                   ? Colors.red.withValues(alpha: isDark ? 0.22 : 0.12)
                   : (isDark
-                        ? Colors.white.withValues(alpha: 0.12)
-                        : Colors.white.withValues(alpha: 0.72)),
+                      ? Colors.white.withValues(alpha: 0.12)
+                      : Colors.white.withValues(alpha: 0.72)),
               borderRadius: BorderRadius.circular(20),
               boxShadow: [
                 BoxShadow(
@@ -672,27 +809,18 @@ class _AdminActionState extends State<_AdminAction> {
                   height: 44,
                   decoration: BoxDecoration(
                     gradient: LinearGradient(
-                      colors: widget.highlightPending
-                          ? [
-                              Colors.redAccent,
-                              Colors.red.withValues(alpha: 0.7),
-                            ]
-                          : [
-                              AppColors.walletAccent,
-                              AppColors.walletAccent.withValues(alpha: 0.72),
-                            ],
+                      colors: [
+                        AppColors.walletAccent,
+                        AppColors.walletAccent.withValues(alpha: 0.7),
+                      ],
                       begin: Alignment.topLeft,
                       end: Alignment.bottomRight,
                     ),
                     borderRadius: BorderRadius.circular(14),
                     boxShadow: [
                       BoxShadow(
-                        color:
-                            (widget.highlightPending
-                                    ? Colors.redAccent
-                                    : AppColors.walletAccent)
-                                .withValues(alpha: 0.2),
-                        blurRadius: 12,
+                        color: AppColors.walletAccent.withValues(alpha: 0.12),
+                        blurRadius: 8,
                         offset: const Offset(0, 6),
                       ),
                     ],
@@ -704,35 +832,28 @@ class _AdminActionState extends State<_AdminAction> {
                   child: Text(
                     widget.title,
                     style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w800,
                       color: onSurface,
+                      fontWeight: FontWeight.w700,
                     ),
                   ),
                 ),
                 if (widget.badgeCount > 0)
                   Container(
                     padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
+                      horizontal: 8,
                       vertical: 6,
                     ),
                     decoration: BoxDecoration(
-                      color: Colors.red,
+                      color: Colors.redAccent,
                       borderRadius: BorderRadius.circular(999),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.red.withValues(alpha: 0.25),
-                          blurRadius: 10,
-                          offset: const Offset(0, 5),
-                        ),
-                      ],
+                      border: Border.all(color: Colors.white.withValues(alpha: 0.12)),
                     ),
                     child: Text(
                       '${widget.badgeCount}',
                       style: const TextStyle(
                         color: Colors.white,
-                        fontSize: 11,
                         fontWeight: FontWeight.w800,
+                        fontSize: 12,
                       ),
                     ),
                   ),
@@ -761,26 +882,19 @@ class _AdminProfileCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
     final uid = authUser?.uid ?? '';
-    final heroTag = uid.isEmpty
-        ? 'admin-profile-avatar'
-        : 'admin-profile-avatar-$uid';
+    final heroTag = uid.isEmpty ? 'admin-profile-avatar' : 'admin-profile-avatar-$uid';
 
     final displayName = profile?.name.trim().isNotEmpty == true
         ? profile!.name.trim()
         : (authUser?.displayName?.trim().isNotEmpty == true
-              ? authUser!.displayName!.trim()
-              : 'Administrator');
+            ? authUser!.displayName!.trim()
+            : 'Administrator');
     final email = profile?.email.trim().isNotEmpty == true
         ? profile!.email.trim()
         : (authUser?.email ?? 'No email');
-    final role = profile?.role.trim().isNotEmpty == true
-        ? profile!.role.trim()
-        : 'Admin';
+    final role = profile?.role.trim().isNotEmpty == true ? profile!.role.trim() : 'Admin';
     final isActive = profile?.active ?? true;
-    final shortUid = uid.length > 10 ? '${uid.substring(0, 10)}...' : uid;
-    final initials = displayName.isNotEmpty
-        ? displayName[0].toUpperCase()
-        : 'A';
+    final initials = displayName.isNotEmpty ? displayName[0].toUpperCase() : 'A';
 
     return GlassCard(
       borderRadius: 24,
@@ -815,35 +929,12 @@ class _AdminProfileCard extends StatelessWidget {
               children: [
                 Hero(
                   tag: heroTag,
-                  child: Container(
-                    width: 60,
-                    height: 60,
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          AppColors.walletAccent,
-                          AppColors.walletAccent.withValues(alpha: 0.75),
-                        ],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
-                      ),
-                      borderRadius: BorderRadius.circular(20),
-                      boxShadow: [
-                        BoxShadow(
-                          color: AppColors.walletAccent.withValues(alpha: 0.22),
-                          blurRadius: 16,
-                          offset: const Offset(0, 8),
-                        ),
-                      ],
-                    ),
-                    alignment: Alignment.center,
+                  child: CircleAvatar(
+                    radius: 30,
+                    backgroundColor: AppColors.walletAccent,
                     child: Text(
                       initials,
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.w900,
-                        color: Colors.white,
-                      ),
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w900, fontSize: 20),
                     ),
                   ),
                 ),
@@ -854,65 +945,33 @@ class _AdminProfileCard extends StatelessWidget {
                     children: [
                       Text(
                         displayName,
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w900,
-                          color: onSurface,
-                        ),
+                        style: TextStyle(fontWeight: FontWeight.w900, color: onSurface),
                       ),
                       const SizedBox(height: 4),
                       Text(
                         email,
-                        style: TextStyle(
-                          fontSize: 13,
-                          color: onSurface.withValues(alpha: 0.72),
+                        style: TextStyle(color: onSurface.withValues(alpha: 0.7), fontSize: 12),
+                      ),
+                      const SizedBox(height: 8),
+                      SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            _ProfileMetaChip(icon: Icons.badge_rounded, label: role),
+                            const SizedBox(width: 8),
+                            _ProfileMetaChip(icon: isActive ? Icons.check_circle : Icons.block, label: isActive ? 'Active' : 'Inactive'),
+                          ],
                         ),
                       ),
                     ],
                   ),
                 ),
-                Container(
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 7,
+                IconButton(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => const AdminProfilePage()),
                   ),
-                  decoration: BoxDecoration(
-                    color: isActive
-                        ? Colors.green.withValues(alpha: 0.14)
-                        : Colors.red.withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(999),
-                    boxShadow: [
-                      BoxShadow(
-                        color: (isActive ? Colors.green : Colors.red)
-                            .withValues(alpha: 0.12),
-                        blurRadius: 10,
-                        offset: const Offset(0, 5),
-                      ),
-                    ],
-                  ),
-                  child: Text(
-                    isActive ? 'Active' : 'Inactive',
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w800,
-                      color: isActive ? Colors.green : Colors.red,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 14),
-            Wrap(
-              spacing: 10,
-              runSpacing: 10,
-              children: [
-                _ProfileMetaChip(
-                  icon: Icons.badge_outlined,
-                  label: 'Role: $role',
-                ),
-                _ProfileMetaChip(
-                  icon: Icons.verified_user_outlined,
-                  label: 'UID: ${shortUid.isEmpty ? 'N/A' : shortUid}',
+                  icon: Icon(Icons.edit_outlined, color: AppColors.walletAccent),
                 ),
               ],
             ),
@@ -937,15 +996,13 @@ class _ProfileMetaChip extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
       decoration: BoxDecoration(
-        color: isDark
-            ? Colors.white.withValues(alpha: 0.12)
-            : Colors.white.withValues(alpha: 0.7),
+        color: isDark ? Colors.white.withValues(alpha: 0.12) : Colors.white.withValues(alpha: 0.7),
         borderRadius: BorderRadius.circular(999),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.04),
-            blurRadius: 10,
-            offset: const Offset(0, 4),
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 6,
+            offset: const Offset(0, 3),
           ),
         ],
       ),
@@ -953,14 +1010,10 @@ class _ProfileMetaChip extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           Icon(icon, size: 14, color: AppColors.walletAccent),
-          const SizedBox(width: 6),
+          const SizedBox(width: 8),
           Text(
             label,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w700,
-              color: onSurface,
-            ),
+            style: TextStyle(color: onSurface, fontWeight: FontWeight.w700, fontSize: 12),
           ),
         ],
       ),
@@ -978,27 +1031,22 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     final onSurface = Theme.of(context).colorScheme.onSurface;
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          title,
-          style: TextStyle(
-            fontSize: 17,
-            fontWeight: FontWeight.w900,
-            color: onSurface,
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w900, color: onSurface),
           ),
-        ),
-        const SizedBox(height: 4),
-        Text(
-          subtitle,
-          style: TextStyle(
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            color: onSurface.withValues(alpha: 0.68),
+          const SizedBox(height: 4),
+          Text(
+            subtitle,
+            style: TextStyle(fontSize: 12, color: onSurface.withValues(alpha: 0.66)),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }
